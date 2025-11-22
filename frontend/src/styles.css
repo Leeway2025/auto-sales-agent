@@ -1,0 +1,15 @@
+/* Global styles are now handled by MUI Theme and CssBaseline */
+:root {
+  --bg1: #0f1020;
+  --bg2: #1b1540;
+  --acc1: #7c3aed;
+  --acc2: #22d3ee;
+  --fg: #e7e7ea;
+}
+
+/* Keep only necessary overrides or utility classes if any */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
