@@ -1,6 +1,14 @@
 # Auto Sales Agent Platform
 
+[![GitHub](https://img.shields.io/badge/GitHub-leewaylicn%2Fauto--sales--agent-blue?logo=github)](https://github.com/leewaylicn/auto-sales-agent)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![React](https://img.shields.io/badge/react-18-61dafb.svg)](https://reactjs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-009688.svg)](https://fastapi.tiangolo.com/)
+
 一个基于 LLM 的智能销售 Agent 创建和管理平台，支持语音交互、声音克隆和流式对话。
+
+> 🎯 **核心亮点**: LLM 驱动的对话式 Onboarding + 声音模板克隆 + 毫秒级流式响应
 
 ## ✨ 核心功能
 
