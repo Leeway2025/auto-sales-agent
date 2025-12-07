@@ -1,4 +1,5 @@
 # Environment variables (CRITICAL - contains API keys)
+.github_token
 .env
 .env.local
 .env.*.local
@@ -61,3 +62,6 @@ Thumbs.db
 
 # Artifacts (documentation only, not code)
 .gemini/
+
+# Ignore the entire CosyVoice dependency directory
+CosyVoice/

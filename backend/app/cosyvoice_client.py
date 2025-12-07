@@ -23,7 +23,7 @@ class CosyVoiceClient:
             base_url: Base URL of CosyVoice2 API (default: from env or localhost:9880)
         """
         self.base_url = base_url or os.getenv("COSYVOICE_URL", "http://localhost:9880")
-        self.enabled = os.getenv("COSYVOICE_ENABLED", "false").lower() == "true"
+        self.enabled = os.getenv("COSYVOICE_ENABLED", "true").lower() == "true"
         
     async def synthesize(
         self,
