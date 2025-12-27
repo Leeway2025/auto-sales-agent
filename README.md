@@ -24,9 +24,9 @@
 - 💬 实时打字效果
 - 📜 自动对话历史管理
 
-### 3. CosyVoice2 声音克隆（可选）
-- 🎤 支持声音克隆 TTS
-- 🔊 使用 onboarding 时录制的声音模板
+### 3. CosyVoice2 语音合成
+- 🎤 使用 CosyVoice2 生成语音（默认输出 WAV）
+- 🔊 支持声音克隆：可使用 onboarding 时录制的声音模板
 - 🌐 多语言支持
 
 ## 🏗️ 技术架构
@@ -34,7 +34,7 @@
 ### 后端
 - **框架**: FastAPI (Python 3.10+)
 - **LLM**: Azure OpenAI (gpt-4o)
-- **TTS**: Azure Speech / CosyVoice2
+- **TTS**: CosyVoice2（必需，用于所有语音合成）
 - **API 设计**: RESTful + SSE (Server-Sent Events)
 
 ### 前端
@@ -77,6 +77,7 @@ auto/
 
 - Python 3.10+
 - Node.js 18+
+- CosyVoice2 服务（默认 `http://localhost:9880`，设置 `COSYVOICE_URL`）
 - Azure OpenAI 账号
 - Azure Speech Services 账号
 
@@ -179,9 +180,9 @@ npm run dev
 - ✅ 内存对话历史管理
 - ✅ 自动历史裁剪（保留最近 20 条）
 
-## 🔧 CosyVoice2 部署（可选）
+## 🔧 CosyVoice2 部署（必需用于 TTS）
 
-如果需要声音克隆功能，请参考 [CosyVoice2 部署指南](docs/cosyvoice_deployment.md)
+平台的所有 TTS 均由 CosyVoice2 提供。请参考 [CosyVoice2 部署指南](docs/cosyvoice_deployment.md) 或自行在本地/服务器启动 CosyVoice2 服务，并在 `backend/.env` 配置 `COSYVOICE_URL` 与 `COSYVOICE_ENABLED=true`。
 
 简要步骤：
 1. 克隆 CosyVoice2 仓库

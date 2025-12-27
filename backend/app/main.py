@@ -5,14 +5,17 @@ import httpx
 import json
 import base64
 import logging
+import uuid
 from typing import Optional, Dict, Any, List
 from functools import partial
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Setup logging
@@ -22,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Load backend/.env before importing azure clients (which read env)
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from .azure_clients import get_aoai_client, transcribe_file, issue_speech_token, synthesize_speech_azure
+from .azure_clients import get_aoai_client, transcribe_file, issue_speech_token
 from .prompt_templates import SYSTEM_PROMPT_BUILDER_TEMPLATE_MD, INTERVIEWER_SYSTEM_PROMPT
 from .cosyvoice_client import get_cosyvoice_client
 import re
@@ -44,6 +47,21 @@ app.add_middleware(
 MODEL = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 if not MODEL:
     MODEL = "__MISSING_MODEL__"
+
+# Serve built frontend (SPA). Mount under /app to avoid shadowing /api routes when running without nginx.
+frontend_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
+if os.path.exists(frontend_dist):
+    app.mount("/app", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse("/app")
+else:
+    logger.warning(f"Frontend dist not found at {frontend_dist}; root will serve docs.")
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse("/docs")
 
 
 # ---------- Schemas ----------
@@ -78,29 +96,80 @@ class SessionState(BaseModel):
 _SESSIONS: Dict[str, SessionState] = {}
 _CONVERSATION_HISTORY: Dict[str, List[Dict[str, str]]] = {}
 _AGENTS_CACHE: Dict[str, Dict[str, Any]] = {} # Cache for agent details
+_USER_ID_DEFAULT = "demo-user"
 
 
 # ---------- Unified TTS Service ----------
-async def synthesize_speech(text: str, reference_audio: Optional[bytes] = None) -> Optional[bytes]:
-    """
-    Synthesizes speech using CosyVoice by default, with Azure as a fallback.
-    """
-    cosyvoice = get_cosyvoice_client()
-    if cosyvoice.enabled:
-        try:
-            logger.info("Attempting TTS with CosyVoice...")
-            return await cosyvoice.synthesize(text=text, reference_audio=reference_audio)
-        except Exception as e:
-            logger.warning(f"CosyVoice synthesis failed: {e}. Falling back to Azure TTS.")
+def _get_cosyvoice_or_error():
+    client = get_cosyvoice_client()
+    if not client.enabled:
+        raise HTTPException(status_code=503, detail="CosyVoice is disabled. Set COSYVOICE_ENABLED=true and ensure the service is reachable.")
+    return client
 
-    # Fallback to Azure TTS
+
+async def synthesize_speech(
+    text: str,
+    reference_audio: Optional[bytes] = None,
+    speaker: str = "default",
+    speed: float = 1.0,
+) -> bytes:
+    """
+    Synthesizes speech using CosyVoice (required). Raises HTTPException on failure.
+    """
+    client = _get_cosyvoice_or_error()
     try:
-        logger.info("Attempting TTS with Azure...")
-        # Note: Azure client does not support reference audio for cloning in this implementation
-        return await run_in_threadpool(synthesize_speech_azure, text)
+        return await client.synthesize(
+            text=text,
+            reference_audio=reference_audio,
+            speaker=speaker,
+            speed=speed,
+        )
     except Exception as e:
-        logger.error(f"Azure TTS synthesis also failed: {e}")
-        return None
+        logger.error(f"CosyVoice synthesis failed: {e}")
+        raise HTTPException(status_code=502, detail=f"CosyVoice synthesis failed: {e}") from e
+
+
+@app.post("/api/tts")
+async def tts_endpoint(
+    text: str = Form(...),
+    speaker: str = Form("default"),
+    speed: float = Form(1.0),
+):
+    try:
+        audio = await synthesize_speech(text=text, speaker=speaker, speed=float(speed))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid speed value")
+    return Response(content=audio, media_type="audio/wav")
+
+
+@app.post("/api/tts/clone")
+async def tts_clone_endpoint(
+    text: str = Form(...),
+    reference_audio: UploadFile = File(...),
+    speed: float = Form(1.0),
+):
+    ref_bytes = await reference_audio.read()
+    if not ref_bytes:
+        raise HTTPException(status_code=400, detail="Reference audio is empty")
+    try:
+        audio = await synthesize_speech(text=text, reference_audio=ref_bytes, speed=float(speed))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid speed value")
+    return Response(content=audio, media_type="audio/wav")
+
+
+@app.get("/api/tts/speakers")
+async def tts_speakers():
+    client = get_cosyvoice_client()
+    speakers = await client.get_speakers() if client.enabled else []
+    return {"speakers": speakers}
+
+
+@app.get("/api/tts/health")
+async def tts_health():
+    client = get_cosyvoice_client()
+    healthy = await client.health_check() if client.enabled else False
+    return {"healthy": healthy, "enabled": client.enabled, "url": client.base_url}
 
 
 # ---------- Helpers ----------
@@ -183,7 +252,13 @@ async def chat_stream(agent_id: str, body: ChatIn):
                 ref_audio_b64 = metadata.get("voice_template_b64")
                 ref_audio = base64.b64decode(ref_audio_b64) if ref_audio_b64 else None
 
-                audio_data = await synthesize_speech(full_reply, reference_audio=ref_audio)
+                audio_data: Optional[bytes] = None
+                try:
+                    audio_data = await synthesize_speech(full_reply, reference_audio=ref_audio)
+                except HTTPException as e:
+                    logger.warning(f"TTS failed for thread {thread_id}: {e.detail}")
+                except Exception as e:
+                    logger.error(f"Unexpected TTS error for thread {thread_id}: {e}")
 
                 if audio_data:
                     audio_b64 = base64.b64encode(audio_data).decode('utf-8')
@@ -206,6 +281,64 @@ async def chat_stream(agent_id: str, body: ChatIn):
 # ---------- Onboarding and Agent Management Routes (Simplified) ----------
 # Note: The original onboarding logic is complex. We keep the core finalization part.
 # The multi-turn conversation part is preserved but could be refactored.
+@app.post("/api/upload")
+async def upload_audio(file: UploadFile = File(...)):
+    """
+    Legacy compatibility for the onboarding page:
+    - saves the uploaded audio to a temp file
+    - runs Azure Speech-to-Text
+    - returns the transcript
+    """
+    suffix = Path(file.filename or "audio").suffix or ".wav"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        data = await file.read()
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    try:
+        transcript = await run_in_threadpool(partial(transcribe_file, tmp_path))
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return {"filename": file.filename or Path(tmp_path).name, "transcript": transcript}
+
+
+@app.post("/api/generate")
+async def generate_agent_from_transcript(body: Dict[str, Any]):
+    """
+    Legacy compatibility endpoint used by the onboarding UI.
+    Creates an Azure Assistant based on a single transcript.
+    """
+    _ensure_model_configured()
+    transcript = (body or {}).get("transcript", "").strip()
+    user_id = (body or {}).get("user_id") or _USER_ID_DEFAULT
+    if not transcript:
+        raise HTTPException(status_code=400, detail="transcript is required")
+
+    aoai = get_aoai_client()
+
+    resp = await run_in_threadpool(lambda: aoai.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT_BUILDER_TEMPLATE_MD},
+            {"role": "user", "content": transcript},
+        ],
+        temperature=0.3,
+    ))
+    prompt_md = resp.choices[0].message.content
+    instructions_plain = _strip_markdown(prompt_md)
+
+    assistant = await run_in_threadpool(lambda: aoai.beta.assistants.create(
+        model=MODEL,
+        name="Voice Agent",
+        instructions=instructions_plain,
+        metadata={"userId": user_id, "source": "legacy-generate"},
+    ))
+
+    return {"agent_id": assistant.id, "prompt": prompt_md}
 
 def _build_profile_summary(fields: Dict[str, Any]) -> str:
     # (This function is simplified for brevity, assuming it exists as before)
@@ -301,7 +434,7 @@ _FIELD_ORDER = ["brand", "industry", "product", "audience", "channels", "goals",
 def _new_session(user_id: str, seed: Optional[str] = None) -> SessionState:
     import uuid, time
     sid = str(uuid.uuid4())
-    state = SessionState(session_id=sid, user_id=user_id or "demo-user", created_at=time.time(), fields={}, missing=list(_FIELD_ORDER), history=[])
+    state = SessionState(session_id=sid, user_id=user_id or _USER_ID_DEFAULT, created_at=time.time(), fields={}, missing=list(_FIELD_ORDER), history=[])
     _SESSIONS[sid] = state
     return state
 
