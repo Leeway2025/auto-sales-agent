@@ -182,7 +182,7 @@ npm run dev
 
 ## 🔧 CosyVoice2 部署（必需用于 TTS）
 
-平台的所有 TTS 均由 CosyVoice2 提供。请参考 [CosyVoice2 部署指南](docs/cosyvoice_deployment.md) 或自行在本地/服务器启动 CosyVoice2 服务，并在 `backend/.env` 配置 `COSYVOICE_URL` 与 `COSYVOICE_ENABLED=true`。
+平台的所有 TTS 均由 CosyVoice2 提供。请参考 [CosyVoice2 部署指南](docs/cosyvoice_deployment.md) 或自行在本地/服务器启动 CosyVoice2 服务，并在 `backend/.env` 配置 `COSYVOICE_URL` 与 `COSYVOICE_ENABLED=true`。快速一键启动（A10 等新机）可查看 [A10 Quickstart](docs/quickstart_a10.md)。
 
 简要步骤：
 1. 克隆 CosyVoice2 仓库
