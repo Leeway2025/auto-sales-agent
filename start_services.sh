@@ -37,7 +37,8 @@ start_cosyvoice_if_present() {
   cd "$COSY_DIR"
   # shellcheck disable=SC1091
   source "$COSY_DIR/venv/bin/activate"
-  nohup python webui.py --port 9880 \
+  MODEL_DIR="${MODEL_DIR:-$COSY_DIR/pretrained_models/CosyVoice2-0.5B}"
+  nohup python runtime/python/fastapi/auto_server.py --port 9880 --model_dir "$MODEL_DIR" \
     > "$RUN_DIR/cosyvoice.log" 2>&1 &
   echo $! > "$RUN_DIR/cosyvoice.pid"
   echo "[OK] CosyVoice started (pid $(cat "$RUN_DIR/cosyvoice.pid"))"
