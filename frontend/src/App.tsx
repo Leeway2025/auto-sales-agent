@@ -16,14 +16,14 @@ export default function App() {
             Voice Agent Studio
           </Typography>
           <Stack direction="row" spacing={3}>
-            <Link component={RouterLink} to="/agents" color="inherit" underline="none" sx={{ '&:hover': { color: 'secondary.main' } }}>
-              Agents
+            <Link component={RouterLink} to="/" color="inherit" underline="none" sx={{ '&:hover': { color: 'secondary.main' } }}>
+              语音上架
             </Link>
             <Link component={RouterLink} to="/onboard-session" color="inherit" underline="none" sx={{ '&:hover': { color: 'secondary.main' } }}>
               向导上架
             </Link>
-            <Link href="https://azure.microsoft.com/" target="_blank" color="inherit" underline="none" sx={{ '&:hover': { color: 'secondary.main' } }}>
-              Azure
+            <Link component={RouterLink} to="/agents" color="inherit" underline="none" sx={{ '&:hover': { color: 'secondary.main' } }}>
+              Agents
             </Link>
           </Stack>
         </Toolbar>

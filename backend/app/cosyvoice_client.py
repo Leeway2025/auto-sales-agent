@@ -7,10 +7,47 @@ synthesis with voice cloning capability.
 import os
 import httpx
 import base64
+import io
+import wave
 from typing import Optional, List, Dict
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _crop_wav_bytes(data: bytes, segment_seconds: float = 9.0) -> bytes:
+    """
+    Pick a mid-section (~segment_seconds) from a WAV byte stream.
+    Falls back to the original data on error.
+    """
+    if not data or segment_seconds <= 0:
+        return data
+    try:
+        bio = io.BytesIO(data)
+        with wave.open(bio, "rb") as r:
+            frame_rate = r.getframerate()
+            n_channels = r.getnchannels()
+            sampwidth = r.getsampwidth()
+            total_frames = r.getnframes()
+            seg_frames = int(segment_seconds * frame_rate)
+            if total_frames <= seg_frames:
+                start_frame = 0
+            else:
+                start_frame = max(0, (total_frames - seg_frames) // 2)
+            r.setpos(start_frame)
+            frames = r.readframes(seg_frames)
+        if not frames:
+            return data
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(n_channels)
+            w.setsampwidth(sampwidth)
+            w.setframerate(frame_rate)
+            w.writeframes(frames)
+        return out.getvalue()
+    except Exception as exc:  # pragma: no cover - best effort cropping
+        logger.warning(f"Failed to crop reference audio: {exc}")
+        return data
 
 
 class CosyVoiceClient:
@@ -49,13 +86,15 @@ class CosyVoiceClient:
         if not self.enabled:
             raise RuntimeError("CosyVoice is not enabled. Set COSYVOICE_ENABLED=true in .env")
         
+        trimmed_ref = _crop_wav_bytes(reference_audio) if reference_audio else None
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            if reference_audio:
+            if trimmed_ref:
                 # Voice cloning mode
-                logger.info(f"Synthesizing with voice cloning: {len(text)} chars")
+                logger.info(f"Synthesizing with voice cloning (cropped ~9s ref): {len(text)} chars")
                 
                 # Encode reference audio to base64
-                ref_audio_b64 = base64.b64encode(reference_audio).decode('utf-8')
+                ref_audio_b64 = base64.b64encode(trimmed_ref).decode('utf-8')
                 
                 payload = {
                     "text": text,
@@ -131,3 +170,8 @@ def get_cosyvoice_client() -> CosyVoiceClient:
     if _client is None:
         _client = CosyVoiceClient()
     return _client
+
+
+# Expose crop helper for other modules
+def crop_reference_audio(data: bytes, segment_seconds: float = 9.0) -> bytes:
+    return _crop_wav_bytes(data, segment_seconds=segment_seconds)

@@ -27,7 +27,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from .azure_clients import get_aoai_client, transcribe_file, issue_speech_token
 from .prompt_templates import SYSTEM_PROMPT_BUILDER_TEMPLATE_MD, INTERVIEWER_SYSTEM_PROMPT
-from .cosyvoice_client import get_cosyvoice_client
+from .cosyvoice_client import get_cosyvoice_client, crop_reference_audio
 import re
 
 
@@ -477,7 +477,8 @@ async def upload_voice_template(session_id: str, audio: UploadFile = File(...)):
     state = _SESSIONS.get(session_id)
     if not state:
         raise HTTPException(status_code=404, detail="session not found")
-    state.voice_template = await audio.read()
+    raw = await audio.read()
+    state.voice_template = crop_reference_audio(raw)
     return {"success": True, "message": "Voice template uploaded."}
 
 # Health check for monitoring
