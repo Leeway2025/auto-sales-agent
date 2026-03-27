@@ -1,0 +1,73 @@
+services:
+  # ── Backend API ────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: voice-agent-backend:latest
+    restart: unless-stopped
+    env_file: ./backend/.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      cosyvoice:
+        condition: service_healthy
+    environment:
+      - COSYVOICE_URL=http://cosyvoice:9880
+      - COSYVOICE_ENABLED=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── CosyVoice2 TTS (GPU) ───────────────────────────────────────────────────
+  cosyvoice:
+    build:
+      context: ./cosyvoice_service
+      dockerfile: Dockerfile
+    image: cosyvoice2-service:latest
+    restart: unless-stopped
+    ports:
+      - "9880:9880"
+    volumes:
+      # Pre-download the model and mount it here to avoid downloading in-container
+      - cosyvoice_models:/workspace/models
+    environment:
+      - COSYVOICE_MODEL_DIR=/workspace/models/CosyVoice2-0.5B
+      # Set MODEL_DOWNLOAD=1 on first run to auto-download model from ModelScope
+      - MODEL_DOWNLOAD=${MODEL_DOWNLOAD:-0}
+      # T4 tuning
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+      - WORKERS=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']   # T4 is device 0 on single-GPU node
+              capabilities: [gpu]
+    shm_size: '2gb'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9880/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s   # Model loading can take ~2 min on T4
+
+  # ── Frontend (Nginx static host) ───────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: voice-agent-frontend:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  cosyvoice_models:
+    driver: local

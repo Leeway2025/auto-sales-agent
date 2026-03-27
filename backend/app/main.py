@@ -1,15 +1,16 @@
 import os
-import asyncio
-import tempfile
-import httpx
+import uuid
+import time
 import json
 import base64
 import logging
-import uuid
+import re
+import tempfile
 from typing import Optional, Dict, Any, List
 from functools import partial
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -28,7 +29,6 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from .azure_clients import get_aoai_client, transcribe_file, issue_speech_token
 from .prompt_templates import SYSTEM_PROMPT_BUILDER_TEMPLATE_MD, INTERVIEWER_SYSTEM_PROMPT
 from .cosyvoice_client import get_cosyvoice_client, crop_reference_audio
-import re
 
 
 # ---------- App & CORS ----------
@@ -432,7 +432,6 @@ async def speech_token():
 _FIELD_ORDER = ["brand", "industry", "product", "audience", "channels", "goals", "tone", "objections", "region_lang"]
 
 def _new_session(user_id: str, seed: Optional[str] = None) -> SessionState:
-    import uuid, time
     sid = str(uuid.uuid4())
     state = SessionState(session_id=sid, user_id=user_id or _USER_ID_DEFAULT, created_at=time.time(), fields={}, missing=list(_FIELD_ORDER), history=[])
     _SESSIONS[sid] = state
@@ -447,30 +446,69 @@ async def onboard_session_start(body: SessionStartIn):
 
 @app.post("/api/onboard_session/{session_id}/message")
 async def onboard_session_message(session_id: str, body: SessionMessageIn):
-    # This is a placeholder for the complex multi-turn logic.
-    # In a real scenario, this would involve LLM calls to ask the next question.
     state = _SESSIONS.get(session_id)
     if not state:
         raise HTTPException(status_code=404, detail="Session not found")
-    
-    # Simplified logic: just record and move to the next field.
-    current_field = state.missing[0] if state.missing else None
-    if current_field:
-        state.fields[current_field] = body.message
-        state.missing.pop(0)
 
+    _ensure_model_configured()
+    aoai = get_aoai_client()
+
+    # Append user message to session history
     state.history.append({"role": "user", "text": body.message})
 
-    if not state.missing:
-        reply = "Great, I have all the information. You can now upload a voice sample or click 'Finalize' to create your agent. [DONE]"
-    else:
-        next_field = state.missing[0]
-        # Simplified question generation
-        reply = f"Thanks. Now, what about {next_field}?"
+    # Build messages for LLM: system prompt + full conversation history
+    messages = [{"role": "system", "content": INTERVIEWER_SYSTEM_PROMPT}]
+    for h in state.history:
+        role = h["role"] if h["role"] in ("user", "assistant") else "user"
+        messages.append({"role": role, "content": h["text"]})
+
+    resp = await run_in_threadpool(lambda: aoai.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=0.7,
+        max_tokens=300,
+    ))
+    reply = resp.choices[0].message.content or ""
 
     state.history.append({"role": "assistant", "text": reply})
-    
-    return {"session": state.model_dump(), "reply": reply, "done": not state.missing}
+
+    # Extract [DONE] signal from reply
+    done = "[DONE]" in reply
+    clean_reply = reply.replace("[DONE]", "").strip()
+
+    # Attempt to extract known fields from conversation via a quick LLM pass
+    # This runs only when done to avoid extra latency on every turn
+    if done:
+        extract_messages = [
+            {"role": "system", "content": (
+                "Extract the following fields from the conversation as JSON. "
+                "Fields: brand, industry, product, audience, channels, goals, tone, objections, region_lang. "
+                "Return ONLY valid JSON with these keys. Use null for missing fields."
+            )},
+            {"role": "user", "content": "\n".join(
+                f"{h['role']}: {h['text']}" for h in state.history
+            )},
+        ]
+        try:
+            extract_resp = await run_in_threadpool(lambda: aoai.chat.completions.create(
+                model=MODEL,
+                messages=extract_messages,
+                temperature=0,
+                max_tokens=400,
+            ))
+            raw = extract_resp.choices[0].message.content or "{}"
+            # Strip markdown code fences if present
+            raw = re.sub(r"```(?:json)?|```", "", raw).strip()
+            extracted = json.loads(raw)
+            for field in _FIELD_ORDER:
+                val = extracted.get(field)
+                if val and val != "null":
+                    state.fields[field] = val
+            state.missing = [f for f in _FIELD_ORDER if not state.fields.get(f)]
+        except Exception as e:
+            logger.warning(f"Field extraction failed: {e}")
+
+    return {"session": state.model_dump(), "reply": clean_reply, "done": done}
 
 @app.post("/api/onboard_session/{session_id}/voice_template")
 async def upload_voice_template(session_id: str, audio: UploadFile = File(...)):
