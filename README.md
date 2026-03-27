@@ -190,33 +190,17 @@ npm run dev
 3. 运行 FastAPI 服务（端口 9880）
 4. 配置 `COSYVOICE_ENABLED=true`
 
-## 🐳 Docker 部署
+## 🐳 Docker Compose 部署（推荐）
 
-### 后端
-
-```bash
-cd backend
-docker build -t auto-backend .
-docker run -d \
-  --name auto-backend \
-  --env-file .env \
-  -p 8000:8000 \
-  auto-backend
-```
-
-### 前端
+一条命令启动全部服务（frontend + backend + CosyVoice2 GPU）：
 
 ```bash
-cd frontend
-npm run build
-
-# 使用 nginx 托管
-docker run -d \
-  --name auto-frontend \
-  -v $(pwd)/dist:/usr/share/nginx/html \
-  -p 80:80 \
-  nginx:alpine
+cp backend/.env.example backend/.env
+# 填入 AZURE_* 密钥后执行：
+MODEL_DOWNLOAD=1 docker compose up -d --build
 ```
+
+详细部署步骤、T4 GPU 配置、常见问题见 [docs/deployment.md](docs/deployment.md)。
 
 ## 📊 API 文档
 
