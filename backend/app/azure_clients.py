@@ -41,32 +41,6 @@ async def issue_speech_token() -> dict:
         return {"token": r.text, "region": region, "expiresIn": 600}
 
 
-def synthesize_speech_azure(text: str, voice: Optional[str] = None) -> bytes:
-    """Synthesize speech using Azure Cognitive Services TTS.
-    Blocking call — run in thread pool from async code.
-    """
-    key = os.getenv("AZURE_SPEECH_KEY")
-    region = _normalize_region(os.getenv("AZURE_SPEECH_REGION", ""))
-    if not key or not region:
-        raise RuntimeError("Missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
-
-    voice_name = voice or os.getenv("AZURE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
-
-    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
-    speech_config.speech_synthesis_voice_name = voice_name
-
-    # Synthesize to in-memory stream
-    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)
-    result = synthesizer.speak_text_async(text).get()
-
-    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        return result.audio_data
-    else:
-        details = getattr(result, "cancellation_details", None)
-        msg = details.error_details if details else "Azure TTS synthesis failed"
-        raise RuntimeError(msg)
-
-
 def transcribe_file(path: str, locale: str = "zh-CN") -> str:
     # Note: This is a blocking call using the SDK. 
     # It should be run in a thread pool executor when called from async code.

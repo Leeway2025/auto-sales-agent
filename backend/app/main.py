@@ -523,3 +523,162 @@ async def upload_voice_template(session_id: str, audio: UploadFile = File(...)):
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 机器人外呼 — 触发接口 & 呼叫中心 Webhook
+# ═══════════════════════════════════════════════════════════════════════════
+
+from .callcenter_client import make_call as _cc_make_call, get_recording_url
+from .robot_call_engine import (
+    create_session, get_session, remove_session,
+    AUDIO_BASE_URL,
+)
+
+
+class RobotCallStartIn(BaseModel):
+    phone: str
+    agent_id: str
+    task_id: Optional[str] = None
+    crm_id: Optional[str] = None
+
+
+@app.post("/api/robot_call/start")
+async def robot_call_start(body: RobotCallStartIn):
+    """触发对指定号码的机器人外呼。"""
+    _ensure_model_configured()
+
+    # 获取 Agent 指令和声音模板
+    agent_details = await get_agent_details(body.agent_id)
+    instructions = agent_details.get("instructions", "你是一名专业的销售顾问，请主动介绍产品。")
+    metadata = agent_details.get("metadata", {})
+    voice_template_b64 = metadata.get("voice_template_b64")
+
+    # 向呼叫中心发起外呼
+    result = await _cc_make_call(
+        phone=body.phone,
+        agent_id=body.agent_id,
+        task_id=body.task_id,
+        crm_id=body.crm_id,
+    )
+    call_uuid = result.get("uuid") or str(uuid.uuid4())
+
+    # 创建对话会话
+    create_session(
+        call_uuid=call_uuid,
+        agent_id=body.agent_id,
+        agent_instructions=instructions,
+        phone=body.phone,
+        voice_template_b64=voice_template_b64,
+    )
+
+    logger.info("Robot call started: phone=%s agent=%s uuid=%s", body.phone, body.agent_id, call_uuid)
+    return {"call_uuid": call_uuid, "phone": body.phone, "status": "calling"}
+
+
+# ---------- 坐席状态回调 (Webhook) ----------
+# 呼叫中心推送格式（参考文档第 10 节）:
+# { "uuid": "...", "buuid": "...", "status": "ring|answer|hangup",
+#   "callee": "...", "memberid": "...(agent_id)", ... }
+
+@app.post("/api/webhook/callcenter/status")
+async def webhook_callcenter_status(body: Dict[str, Any]):
+    """呼叫中心坐席状态回调（ring / answer / hangup）。"""
+    call_uuid = body.get("uuid") or body.get("buuid", "")
+    status = body.get("status", "")
+    logger.info("Webhook status: uuid=%s status=%s", call_uuid, status)
+
+    session = get_session(call_uuid)
+
+    if status == "answer" and session:
+        # 通话接通 → 播放开场白
+        opener_audio = await session.on_answered()
+        if opener_audio and AUDIO_BASE_URL:
+            # 将音频存到临时可访问路径（简化实现，生产可用 OSS/CDN）
+            audio_filename = f"{call_uuid}_opener.wav"
+            audio_path = f"/tmp/{audio_filename}"
+            with open(audio_path, "wb") as f:
+                f.write(opener_audio)
+            audio_url = f"{AUDIO_BASE_URL}/api/robot_call/audio/{audio_filename}"
+            return {"code": 0, "audio_url": audio_url}
+
+    elif status == "hangup" and session:
+        session.on_hangup()
+        remove_session(call_uuid)
+
+    return {"code": 0}
+
+
+# ---------- 通话记录回调 (Webhook) ----------
+# 呼叫中心推送格式（参考文档第 11 节）:
+# { "id": 69100, "type": "callout", "destNumber": "...",
+#   "recordFilename": "...", "downloadIp": "...", ... }
+
+@app.post("/api/webhook/callcenter/record")
+async def webhook_callcenter_record(body: Dict[str, Any]):
+    """通话结束后呼叫中心推送通话记录（含录音信息）。"""
+    record_id = body.get("id")
+    call_uuid = body.get("uuid", "")
+    record_filename = body.get("recordFilename", "")
+    download_ip = body.get("downloadIp", "")
+    duration = body.get("duration", 0)
+    bill_sec = body.get("billsec", 0)
+
+    logger.info(
+        "Call record: id=%s uuid=%s duration=%ds billsec=%ds file=%s",
+        record_id, call_uuid, duration, bill_sec, record_filename,
+    )
+
+    # 如果有录音文件，可在此触发录音分析（异步，不阻塞回调响应）
+    if record_filename and download_ip:
+        recording_url = f"http://{download_ip}/{record_filename}"
+        logger.info("Recording available: %s", recording_url)
+        # TODO: 可在此触发后处理任务（话术分析、CRM 写入等）
+
+    return "0"   # 文档约定成功返回字符 "0"
+
+
+# ---------- 收到客户说话录音片段（Webhook 或轮询） ----------
+# 如果呼叫中心支持「实时录音片段推送」，用此接口：
+
+@app.post("/api/webhook/callcenter/audio")
+async def webhook_callcenter_audio(body: Dict[str, Any]):
+    """收到客户单轮说话录音 URL，驱动一轮 STT→LLM→TTS。"""
+    call_uuid = body.get("uuid", "")
+    audio_url = body.get("audio_url", "")
+
+    if not call_uuid or not audio_url:
+        return {"code": 1, "msg": "missing uuid or audio_url"}
+
+    session = get_session(call_uuid)
+    if not session:
+        logger.warning("No session for uuid=%s", call_uuid)
+        return {"code": 1, "msg": "session not found"}
+
+    reply_audio = await session.on_user_audio(audio_url)
+
+    if reply_audio and AUDIO_BASE_URL:
+        audio_filename = f"{call_uuid}_turn{session.turn}.wav"
+        with open(f"/tmp/{audio_filename}", "wb") as f:
+            f.write(reply_audio)
+        audio_url_out = f"{AUDIO_BASE_URL}/api/robot_call/audio/{audio_filename}"
+        return {"code": 0, "audio_url": audio_url_out}
+
+    return {"code": 0}
+
+
+# ---------- 临时音频文件下载（供呼叫中心拉取） ----------
+
+@app.get("/api/robot_call/audio/{filename}")
+async def serve_robot_audio(filename: str):
+    """提供 TTS 生成的音频文件给呼叫中心下载播放。"""
+    # 安全：只允许 uuid_*.wav 格式，防止路径穿越
+    import re as _re
+    if not _re.match(r'^[a-zA-Z0-9_-]+\.wav$', filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = f"/tmp/{filename}"
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Audio not found")
+    with open(path, "rb") as f:
+        data = f.read()
+    return Response(content=data, media_type="audio/wav")
