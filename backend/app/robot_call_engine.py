@@ -33,6 +33,17 @@ from .azure_clients import get_aoai_client, transcribe_file, synthesize_speech_a
 from .cosyvoice_client import get_cosyvoice_client
 from .callcenter_client import hangup_call
 
+# 注入到所有电话 Agent system prompt 末尾的补丁
+# 无论 Agent 是否经过 Onboarding 生成，都保证挂机规则生效
+_PHONE_SYSTEM_PATCH = """
+
+【电话机器人专用规则 — 优先级最高，不可覆盖】
+你正在进行自动电话销售通话。每轮回复必须是纯中文口语短句，不含任何符号或格式。每轮最多两句，每句不超过二十五字。
+挂机信号：当出现以下任意情形时，在当轮回复最后加 [HANGUP]，系统将播完后自动挂断。
+触发情形：客户明确拒绝或不感兴趣；客户要求挂断或表示正在忙；成交/预约确认并完成收尾致谢；对话已无需继续；客户情绪激动或出现辱骂。
+示例收尾：好的，感谢您接听，祝您生活愉快。[HANGUP]
+除上述情形外，禁止输出 [HANGUP]。"""
+
 logger = logging.getLogger(__name__)
 
 # ---------- 会话存储（内存，可换 Redis） ----------
@@ -69,7 +80,7 @@ class RobotCallSession:
             base64.b64decode(voice_template_b64) if voice_template_b64 else None
         )
         self.history: List[Dict[str, str]] = [
-            {"role": "system", "content": agent_instructions}
+            {"role": "system", "content": agent_instructions + _PHONE_SYSTEM_PATCH}
         ]
         self.turn = 0
         self.started_at = time.time()
