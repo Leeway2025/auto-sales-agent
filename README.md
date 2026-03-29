@@ -199,7 +199,13 @@ curl -X POST http://your-server:8000/api/robot_call/start \
 ### 外呼功能（使用前必须）
 - [ ] `backend/.env` 填入 `CALLCENTER_APP_ID` 和 `CALLCENTER_ACC_KEY`
 - [ ] `backend/.env` 填入 `ROBOT_CALL_AUDIO_BASE_URL`（服务器公网地址）
-- [ ] 在云虎呼叫中心后台配置上方 3 个 Webhook 回调地址
+- [ ] 在云虎呼叫中心后台配置以下 3 个 Webhook 回调地址（将 `your-server` 替换为服务器 IP 或域名）：
+  - **坐席状态回调**：`http://your-server:8000/api/webhook/callcenter/status`
+    （接收 ring/answer/hangup 事件，接通时触发机器人开场白）
+  - **实时录音片段回调**：`http://your-server:8000/api/webhook/callcenter/audio`
+    （每轮客户说完推送录音，驱动 STT→LLM→TTS 对话循环，**缺此项机器人无法回应客户**）
+  - **通话记录回调**：`http://your-server:8000/api/webhook/callcenter/record`
+    （通话结束后推送完整记录，含时长和录音文件地址）
 - [ ] 在 Agent system prompt 中加入挂机说明（新建 Agent 自动包含，旧 Agent 需手动更新）
 
 ### 生产加固（上线前建议）
