@@ -1,242 +1,246 @@
 # Auto Sales Agent Platform
 
-[![GitHub](https://img.shields.io/badge/GitHub-leewaylicn%2Fauto--sales--agent-blue?logo=github)](https://github.com/leewaylicn/auto-sales-agent)
+[![GitHub](https://img.shields.io/badge/GitHub-Leeway2025%2Fauto--sales--agent-blue?logo=github)](https://github.com/Leeway2025/auto-sales-agent)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![React](https://img.shields.io/badge/react-18-61dafb.svg)](https://reactjs.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-009688.svg)](https://fastapi.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.114+-009688.svg)](https://fastapi.tiangolo.com/)
 
-一个基于 LLM 的智能销售 Agent 创建和管理平台，支持语音交互、声音克隆和流式对话。
+一个基于 LLM 的智能销售 Agent 创建和管理平台，支持语音交互、声音克隆、流式对话，以及**机器人自动电话外呼销售**。
 
-> 🎯 **核心亮点**: LLM 驱动的对话式 Onboarding + 声音模板克隆 + 毫秒级流式响应
+> **核心亮点**: LLM 对话式 Onboarding + CosyVoice2 声音克隆 + 毫秒级流式响应 + 云虎呼叫中心自动外呼
 
-## ✨ 核心功能
+---
+
+## 核心功能
 
 ### 1. LLM 驱动的 Onboarding 向导
-- 🤖 智能对话式信息收集
-- 📝 自动提取品牌、行业、受众等关键信息
-- 🎯 动态生成个性化销售话术
-- 🎙️ **声音模板录制**：录制 5 秒声音，Agent 将用你的声音说话
+- 智能对话式信息收集（品牌、行业、受众、话术风格等）
+- 自动生成个性化销售 Agent system prompt
+- 声音模板录制：录制 5 秒声音，Agent 将用你的声音说话
 
 ### 2. 高性能聊天系统
-- ⚡ **流式响应**：首字延迟 < 1 秒
-- 🚀 **Chat Completions API**：响应时间从 5-8 秒降至 4 秒
-- 💬 实时打字效果
-- 📜 自动对话历史管理
+- 流式响应，首字延迟 < 1 秒
+- Server-Sent Events (SSE) 实时打字效果
+- 自动对话历史管理（保留最近 20 轮）
 
-### 3. CosyVoice2 语音合成
-- 🎤 使用 CosyVoice2 生成语音（默认输出 WAV）
-- 🔊 支持声音克隆：可使用 onboarding 时录制的声音模板
-- 🌐 多语言支持
+### 3. CosyVoice2 声音克隆 TTS
+- 声音克隆：使用 Onboarding 录制的声音模板合成语音
+- Azure TTS 自动回退（CosyVoice2 不可用时）
+- T4 GPU 优化部署，单轮合成延迟约 3 秒
 
-## 🏗️ 技术架构
+### 4. 机器人自动电话外呼
+- 对接云虎呼叫中心 API，一键触发外呼任务
+- 全自动对话循环：客户录音 → Azure STT → LLM → TTS → 播放
+- 智能挂机：LLM 判断通话结束时自动挂断
+- Webhook 接收呼叫状态、录音片段、通话记录
 
-### 后端
-- **框架**: FastAPI (Python 3.10+)
-- **LLM**: Azure OpenAI (gpt-4o)
-- **TTS**: CosyVoice2（必需，用于所有语音合成）
-- **API 设计**: RESTful + SSE (Server-Sent Events)
+---
 
-### 前端
-- **框架**: React 18 + TypeScript
-- **构建工具**: Vite
-- **UI 库**: Material-UI (MUI)
-- **路由**: React Router v6
+## 技术架构
 
-## 📁 项目结构
+| 层级 | 技术 |
+|------|------|
+| 后端 | FastAPI + Uvicorn (Python 3.11) |
+| 前端 | React 18 + TypeScript + Vite + MUI |
+| LLM | Azure OpenAI (gpt-4o-mini) |
+| STT | Azure Speech Services |
+| TTS | CosyVoice2（声音克隆）+ Azure TTS（回退） |
+| 外呼 | 云虎呼叫中心 (call.yunhus.com) |
+| 部署 | Docker Compose + NVIDIA T4 GPU |
+
+---
+
+## 项目结构
 
 ```
 auto/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI 主应用
-│   │   ├── azure_clients.py     # Azure 服务封装
-│   │   ├── cosyvoice_client.py  # CosyVoice2 客户端
-│   │   └── prompt_templates.py  # Prompt 模板
+│   │   ├── main.py                # FastAPI 主应用 + 所有路由
+│   │   ├── azure_clients.py       # Azure OpenAI / Speech 封装
+│   │   ├── cosyvoice_client.py    # CosyVoice2 HTTP 客户端
+│   │   ├── callcenter_client.py   # 云虎呼叫中心 API 客户端
+│   │   ├── robot_call_engine.py   # 机器人外呼对话引擎
+│   │   └── prompt_templates.py    # Prompt 模板（含挂机规则）
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── .env.example
+├── cosyvoice_service/             # CosyVoice2 微服务
+│   ├── api_server.py              # FastAPI TTS 服务
+│   ├── Dockerfile                 # T4 GPU 优化镜像
+│   ├── entrypoint.sh
+│   └── download_model.py          # 自动下载模型
 ├── frontend/
 │   ├── src/
-│   │   ├── pages/
-│   │   │   ├── OnboardSession.tsx  # Onboarding 向导
-│   │   │   ├── Agents.tsx          # Agent 列表
-│   │   │   └── Chat.tsx            # 聊天界面
-│   │   ├── hooks/
-│   │   │   ├── useSpeechSDK.ts     # Azure Speech SDK
-│   │   │   └── useVoiceClone.ts    # 声音克隆
-│   │   └── api/index.ts            # API 服务
-│   ├── package.json
-│   └── vite.config.ts
-└── README.md
+│   │   ├── pages/                 # Onboarding / Agents / Chat
+│   │   ├── hooks/                 # Azure Speech SDK / 声音克隆
+│   │   └── api/index.ts           # API 客户端
+│   ├── Dockerfile                 # 多阶段构建 + Nginx
+│   └── nginx.conf                 # API 反向代理 + SSE 支持
+├── docker-compose.yml             # 一键启动三服务
+└── docs/
+    ├── deployment.md              # 完整部署指南
+    ├── robot_call_architecture.md # 外呼架构与 API 文档
+    └── cosyvoice_deployment.md    # CosyVoice2 手动部署
 ```
-
-## 🚀 快速开始
-
-### 前置要求
-
-- Python 3.10+
-- Node.js 18+
-- CosyVoice2 服务（默认 `http://localhost:9880`，设置 `COSYVOICE_URL`）
-- Azure OpenAI 账号
-- Azure Speech Services 账号
-
-### 1. 克隆仓库
-
-```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
-cd YOUR_REPO_NAME
-```
-
-### 2. 配置后端
-
-```bash
-cd backend
-
-# 创建虚拟环境
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入你的 Azure 凭证
-```
-
-**backend/.env** 示例：
-```bash
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-AZURE_OPENAI_API_KEY=your-api-key
-AZURE_OPENAI_API_VERSION=2025-01-01-preview
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-
-AZURE_SPEECH_KEY=your-speech-key
-AZURE_SPEECH_REGION=australiaeast
-
-CORS_ORIGINS=http://localhost:5173
-
-# CosyVoice2 (可选)
-COSYVOICE_URL=http://localhost:9880
-COSYVOICE_ENABLED=false
-```
-
-### 3. 启动后端
-
-```bash
-cd backend
-python3 -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-后端将在 `http://localhost:8000` 启动
-
-### 4. 配置前端
-
-```bash
-cd frontend
-
-# 安装依赖
-npm install
-```
-
-### 5. 启动前端
-
-```bash
-npm run dev
-```
-
-前端将在 `http://localhost:5173` 启动
-
-## 📖 使用指南
-
-### 创建 Agent
-
-1. 访问 `http://localhost:5173/onboard-session`
-2. 与 Interviewer Agent 对话，提供品牌信息
-3. 等待 `[DONE]` 标记出现
-4. **（可选）点击"录制声音"按钮**，录制 5 秒声音模板
-5. 点击"确认生成"创建 Agent
-
-### 与 Agent 聊天
-
-1. 访问 `http://localhost:5173/agents`
-2. 点击任意 Agent 的"聊天"按钮
-3. 开始对话（支持流式响应）
-
-## 🎯 性能优化
-
-### 已实现的优化
-
-| 优化项 | 优化前 | 优化后 | 提升 |
-|--------|--------|--------|------|
-| **聊天响应** | 5-8 秒 | 4 秒 | 20-50% |
-| **首字延迟** | 4 秒 | < 1 秒 | 75% |
-| **API 调用** | 7-14 次 | 1 次 | 7-14x |
-
-### 优化技术
-- ✅ Chat Completions API 替换 Assistants API
-- ✅ Server-Sent Events (SSE) 流式响应
-- ✅ 内存对话历史管理
-- ✅ 自动历史裁剪（保留最近 20 条）
-
-## 🔧 CosyVoice2 部署（必需用于 TTS）
-
-平台的所有 TTS 均由 CosyVoice2 提供。请参考 [CosyVoice2 部署指南](docs/cosyvoice_deployment.md) 或自行在本地/服务器启动 CosyVoice2 服务，并在 `backend/.env` 配置 `COSYVOICE_URL` 与 `COSYVOICE_ENABLED=true`。快速一键启动（A10 等新机）可查看 [A10 Quickstart](docs/quickstart_a10.md)。
-
-简要步骤：
-1. 克隆 CosyVoice2 仓库
-2. 下载模型
-3. 运行 FastAPI 服务（端口 9880）
-4. 配置 `COSYVOICE_ENABLED=true`
-
-## 🐳 Docker Compose 部署（推荐）
-
-一条命令启动全部服务（frontend + backend + CosyVoice2 GPU）：
-
-```bash
-cp backend/.env.example backend/.env
-# 填入 AZURE_* 密钥后执行：
-MODEL_DOWNLOAD=1 docker compose up -d --build
-```
-
-详细部署步骤、T4 GPU 配置、常见问题见 [docs/deployment.md](docs/deployment.md)。
-
-## 📊 API 文档
-
-启动后端后访问：
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-### 主要端点
-
-- `POST /api/onboard_session/start` - 开始 onboarding
-- `POST /api/onboard_session/{id}/message` - 发送消息
-- `POST /api/onboard_session/{id}/voice_template` - 上传声音模板
-- `POST /api/onboard_session/{id}/finalize` - 生成 Agent
-- `GET /api/agents` - 获取 Agent 列表
-- `POST /api/agents/{id}/chat` - 与 Agent 聊天
-- `POST /api/agents/{id}/chat/stream` - 流式聊天
-
-## 🔐 安全注意事项
-
-- ⚠️ **永远不要提交 `.env` 文件**
-- 🔑 使用 Azure Key Vault 管理生产环境密钥
-- 🌐 配置正确的 CORS 源
-- 🔒 在生产环境启用 HTTPS
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可证
-
-MIT License
-
-## 📞 联系方式
-
-如有问题，请提交 Issue 或联系维护者。
 
 ---
 
-**Built with ❤️ using Azure OpenAI, FastAPI, and React**
+## 快速开始（Docker Compose）
+
+```bash
+git clone https://github.com/Leeway2025/auto-sales-agent.git
+cd auto-sales-agent
+
+cp backend/.env.example backend/.env
+# 编辑 backend/.env，填入所有必填项（见下方）
+
+# 首次启动（自动下载 CosyVoice2 模型 ~2GB）
+MODEL_DOWNLOAD=1 docker compose up -d --build
+```
+
+服务启动后：
+- 前端：`http://your-server-ip`
+- 后端 API 文档：`http://your-server-ip:8000/docs`
+- CosyVoice2：`http://your-server-ip:9880/health`
+
+详细部署说明见 [docs/deployment.md](docs/deployment.md)。
+
+---
+
+## 环境变量
+
+复制并填写 `backend/.env`：
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+### 必填
+
+```env
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+AZURE_OPENAI_API_KEY=your-key
+AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
+AZURE_SPEECH_KEY=your-speech-key
+AZURE_SPEECH_REGION=australiaeast
+```
+
+### 外呼功能（使用机器人电话时必填）
+
+```env
+CALLCENTER_APP_ID=your-appid
+CALLCENTER_ACC_KEY=your-acckey
+ROBOT_CALL_AUDIO_BASE_URL=http://your-server-ip:8000
+```
+
+### 可选
+
+```env
+CORS_ORIGINS=http://localhost:5173   # 生产改为实际域名
+COSYVOICE_ENABLED=true
+AZURE_TTS_VOICE=zh-CN-XiaoxiaoNeural
+ROBOT_CALL_MAX_TURNS=20
+ROBOT_CALL_TURN_TIMEOUT=30
+```
+
+---
+
+## 使用指南
+
+### 创建销售 Agent
+
+1. 访问 `/onboard-session`
+2. 与 AI 面试官对话，提供品牌、行业、产品等信息
+3. 出现"创建"按钮后，可选择录制 5 秒声音模板
+4. 点击"确认生成"完成创建
+
+### 网页聊天
+
+1. 访问 `/agents`，点击任意 Agent 的"聊天"
+2. 支持文字输入和流式语音回复
+
+### 机器人自动外呼
+
+```bash
+curl -X POST http://your-server:8000/api/robot_call/start \
+  -H "Content-Type: application/json" \
+  -d '{"phone": "13800138000", "agent_id": "asst_xxx"}'
+```
+
+系统将自动拨打客户电话，用 Agent 的声音和话术进行销售对话，并在合适时机自动挂断。
+
+详细架构和 Webhook 说明见 [docs/robot_call_architecture.md](docs/robot_call_architecture.md)。
+
+---
+
+## 呼叫中心配置
+
+在云虎呼叫中心管理后台配置以下回调地址：
+
+| 回调类型 | 地址 |
+|---------|------|
+| 坐席状态回调 | `http://your-server:8000/api/webhook/callcenter/status` |
+| 实时录音片段 | `http://your-server:8000/api/webhook/callcenter/audio` |
+| 通话记录回调 | `http://your-server:8000/api/webhook/callcenter/record` |
+
+---
+
+## 当前待办事项
+
+以下是部署和使用前需要完成的配置工作：
+
+### 部署前（必须）
+- [ ] 填写 `backend/.env` 中所有 `AZURE_*` 必填项
+- [ ] 确认服务器已安装 `nvidia-container-toolkit`（T4 GPU 节点）
+- [ ] 将 `CORS_ORIGINS` 改为实际前端域名/IP
+
+### 外呼功能（使用前必须）
+- [ ] `backend/.env` 填入 `CALLCENTER_APP_ID` 和 `CALLCENTER_ACC_KEY`
+- [ ] `backend/.env` 填入 `ROBOT_CALL_AUDIO_BASE_URL`（服务器公网地址）
+- [ ] 在云虎呼叫中心后台配置上方 3 个 Webhook 回调地址
+- [ ] 在 Agent system prompt 中加入挂机说明（新建 Agent 自动包含，旧 Agent 需手动更新）
+
+### 生产加固（上线前建议）
+- [ ] 为外呼 Webhook 添加 IP 白名单或签名验证
+- [ ] 将 `/tmp/*.wav` 音频临时文件改为 OSS/CDN 存储（当前为本地 /tmp）
+- [ ] 将机器人会话从内存改为 Redis（当前重启后会话丢失）
+- [ ] 配置 HTTPS（呼叫中心回调通常要求 HTTPS）
+- [ ] 确认外呼合规：时段限制、频次限制、号码黑名单
+
+---
+
+## API 文档
+
+启动后访问：
+- Swagger UI：`http://localhost:8000/docs`
+- ReDoc：`http://localhost:8000/redoc`
+
+主要端点：
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/onboard_session/start` | 开始 Onboarding |
+| `POST /api/onboard_session/{id}/message` | Onboarding 对话 |
+| `POST /api/onboard_session/{id}/finalize` | 生成 Agent |
+| `GET /api/agents` | Agent 列表 |
+| `POST /api/agents/{id}/chat/stream` | 流式聊天 |
+| `POST /api/robot_call/start` | 触发机器人外呼 |
+| `POST /api/tts` | TTS 合成 |
+| `GET /health` | 服务健康检查 |
+
+---
+
+## 安全注意事项
+
+- **永远不要提交 `.env` 文件**（已在 `.gitignore` 排除）
+- 生产环境启用 HTTPS
+- 配置正确的 `CORS_ORIGINS`，不要使用 `*`
+- 外呼 Webhook 建议配置 IP 白名单
+
+---
+
+## 许可证
+
+MIT License
