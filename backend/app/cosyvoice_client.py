@@ -138,10 +138,14 @@ class CosyVoiceClient:
             try:
                 response = await client.get(f"{self.base_url}/api/speakers")
                 response.raise_for_status()
-                return response.json()
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+                logger.error("Unexpected speakers payload type: %s", type(data).__name__)
+                return []
             except httpx.HTTPError as e:
                 logger.error(f"Failed to get speakers: {e}")
-                return [{"id": "default", "name": "Default"}]
+                return []
     
     async def health_check(self) -> bool:
         """Check if CosyVoice API is healthy

@@ -26,7 +26,12 @@ logger = logging.getLogger(__name__)
 # Load backend/.env before importing azure clients (which read env)
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from .azure_clients import get_aoai_client, transcribe_file, issue_speech_token
+from .azure_clients import (
+    get_aoai_client,
+    transcribe_file,
+    issue_speech_token,
+    synthesize_speech_azure,
+)
 from .prompt_templates import SYSTEM_PROMPT_BUILDER_TEMPLATE_MD, INTERVIEWER_SYSTEM_PROMPT
 from .cosyvoice_client import get_cosyvoice_client, crop_reference_audio
 
@@ -100,13 +105,6 @@ _USER_ID_DEFAULT = "demo-user"
 
 
 # ---------- Unified TTS Service ----------
-def _get_cosyvoice_or_error():
-    client = get_cosyvoice_client()
-    if not client.enabled:
-        raise HTTPException(status_code=503, detail="CosyVoice is disabled. Set COSYVOICE_ENABLED=true and ensure the service is reachable.")
-    return client
-
-
 async def synthesize_speech(
     text: str,
     reference_audio: Optional[bytes] = None,
@@ -114,19 +112,41 @@ async def synthesize_speech(
     speed: float = 1.0,
 ) -> bytes:
     """
-    Synthesizes speech using CosyVoice (required). Raises HTTPException on failure.
+    Prefer CosyVoice for cloning/preset voices, fallback to Azure TTS when needed.
     """
-    client = _get_cosyvoice_or_error()
+    client = get_cosyvoice_client()
+
+    if client.enabled:
+        try:
+            resolved_speaker = speaker
+            if reference_audio is None:
+                speakers = await client.get_speakers()
+                if speakers:
+                    speaker_ids = [spk.get("id", "") for spk in speakers if spk.get("id")]
+                    if speaker_ids and (not speaker or speaker == "default" or speaker not in speaker_ids):
+                        resolved_speaker = speaker_ids[0]
+                else:
+                    logger.warning("CosyVoice has no preset speakers; service-side zero-shot fallback will be used.")
+
+            return await client.synthesize(
+                text=text,
+                reference_audio=reference_audio,
+                speaker=resolved_speaker,
+                speed=speed,
+            )
+        except Exception as e:
+            if reference_audio is not None:
+                logger.error("CosyVoice clone synthesis failed: %s", e)
+                raise HTTPException(status_code=502, detail=f"CosyVoice synthesis failed: {e}") from e
+            logger.warning("CosyVoice synthesis failed, falling back to Azure TTS: %s", e)
+    else:
+        logger.warning("CosyVoice is disabled; using Azure TTS fallback.")
+
     try:
-        return await client.synthesize(
-            text=text,
-            reference_audio=reference_audio,
-            speaker=speaker,
-            speed=speed,
-        )
+        return await run_in_threadpool(synthesize_speech_azure, text)
     except Exception as e:
-        logger.error(f"CosyVoice synthesis failed: {e}")
-        raise HTTPException(status_code=502, detail=f"CosyVoice synthesis failed: {e}") from e
+        logger.error("Azure TTS fallback failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"TTS synthesis failed: {e}") from e
 
 
 @app.post("/api/tts")

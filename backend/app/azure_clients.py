@@ -1,6 +1,7 @@
 import os
 import httpx
 from typing import Optional
+from xml.sax.saxutils import escape
 
 from openai import AzureOpenAI
 import azure.cognitiveservices.speech as speechsdk
@@ -69,34 +70,48 @@ def transcribe_file(path: str, locale: str = "zh-CN") -> str:
 
 def synthesize_speech_azure(text: str, voice_name: Optional[str] = None) -> bytes:
     """
-    Synthesize speech using Azure Speech and return raw audio bytes.
+    Synthesize speech via Azure Speech REST API and return WAV bytes.
     """
     key = os.getenv("AZURE_SPEECH_KEY")
     region = _normalize_region(os.getenv("AZURE_SPEECH_REGION", ""))
     if not key or not region:
         raise RuntimeError("Missing AZURE_SPEECH_KEY or AZURE_SPEECH_REGION")
 
-    voice = voice_name or os.getenv("AZURE_SPEECH_VOICE", "zh-CN-XiaoxiaoNeural")
+    if not text or not text.strip():
+        raise RuntimeError("text is required")
 
-    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
-    speech_config.speech_synthesis_voice_name = voice
-    speech_config.set_speech_synthesis_output_format(
-        speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+    voice = (
+        voice_name
+        or os.getenv("AZURE_TTS_VOICE")
+        or os.getenv("AZURE_SPEECH_VOICE")
+        or "zh-CN-XiaoxiaoNeural"
     )
 
-    # Disable default speaker output; we'll read the stream instead.
-    audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=False)
-    synthesizer = speechsdk.SpeechSynthesizer(
-        speech_config=speech_config,
-        audio_config=audio_config,
+    token_url = f"https://{region}.api.cognitive.microsoft.com/sts/v1.0/issueToken"
+    tts_url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    ssml = (
+        "<speak version='1.0' xml:lang='zh-CN'>"
+        f"<voice name='{voice}'>{escape(text.strip())}</voice>"
+        "</speak>"
     )
 
-    result = synthesizer.speak_text(text)
+    with httpx.Client(timeout=20.0) as client:
+        token_resp = client.post(
+            token_url,
+            headers={"Ocp-Apim-Subscription-Key": key},
+        )
+        token_resp.raise_for_status()
+        token = token_resp.text
 
-    if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        stream = speechsdk.AudioDataStream(result)
-        return stream.read_all()
-
-    details = getattr(result, "cancellation_details", None)
-    msg = details.error_details if details else "Speech synthesis failed"
-    raise RuntimeError(msg)
+        tts_resp = client.post(
+            tts_url,
+            content=ssml.encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/ssml+xml",
+                "X-Microsoft-OutputFormat": "riff-16khz-16bit-mono-pcm",
+                "User-Agent": "auto-sales-agent",
+            },
+        )
+        tts_resp.raise_for_status()
+        return tts_resp.content

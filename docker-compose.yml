@@ -64,7 +64,7 @@ services:
     image: voice-agent-frontend:latest
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-80}:80"
     depends_on:
       - backend
 

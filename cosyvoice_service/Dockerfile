@@ -47,9 +47,11 @@ RUN pip install --no-cache-dir \
     torchaudio==2.2.2+cu121 \
     --extra-index-url https://download.pytorch.org/whl/cu121
 
-# Install CosyVoice requirements (skip TensorRT; not needed for T4 inference)
+# Install CosyVoice requirements.
+# Skip TensorRT and DeepSpeed to avoid build-time CUDA toolchain (nvcc) dependency
+# in runtime images; they are not required for this inference service path.
 RUN cd CosyVoice && \
-    grep -v "tensorrt" requirements.txt > requirements_notrt.txt && \
+    grep -Ev "tensorrt|deepspeed" requirements.txt > requirements_notrt.txt && \
     pip install --no-cache-dir -r requirements_notrt.txt \
         --extra-index-url https://download.pytorch.org/whl/cu121
 
