@@ -6,13 +6,18 @@ import base64
 import logging
 import re
 import tempfile
+import io
+import wave
+import audioop
+import asyncio
+from contextlib import suppress
 from typing import Optional, Dict, Any, List
 from functools import partial
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response, RedirectResponse
@@ -102,6 +107,22 @@ _SESSIONS: Dict[str, SessionState] = {}
 _CONVERSATION_HISTORY: Dict[str, List[Dict[str, str]]] = {}
 _AGENTS_CACHE: Dict[str, Dict[str, Any]] = {} # Cache for agent details
 _USER_ID_DEFAULT = "demo-user"
+_WS_STREAM_SESSIONS: Dict[str, Dict[str, Any]] = {}
+
+# WebSocket audio stream tuning (demo-callcenter.py style)
+WS_STREAM_DEFAULT_SR = int(os.getenv("CALLCENTER_WS_SAMPLE_RATE", "8000"))
+WS_STREAM_FLUSH_MS = int(os.getenv("CALLCENTER_WS_FLUSH_MS", "900"))
+WS_STREAM_MAX_BUFFER_SEC = int(os.getenv("CALLCENTER_WS_MAX_BUFFER_SEC", "12"))
+WS_STREAM_MAX_HISTORY = 41
+WS_STREAM_SUPPORTED_SR = (8000, 16000)
+WS_STREAM_FLUSH_EVENTS = {"flush", "eou", "end_of_utterance", "speech_end", "commit"}
+_WS_PHONE_SYSTEM_PATCH = """
+
+【电话机器人专用规则 — 优先级最高，不可覆盖】
+你正在进行自动电话销售通话。每轮回复必须是纯中文口语短句，不含任何符号或格式。每轮最多两句，每句不超过二十五字。
+挂机信号：当出现以下任意情形时，在当轮回复最后加 [HANGUP]。
+触发情形：客户明确拒绝或不感兴趣；客户要求挂断或表示正在忙；成交/预约确认并完成收尾致谢；对话已无需继续。"""
+_WS_HANGUP_SIGNALS = ["[HANGUP]", "[END]", "[再见]", "[挂断]"]
 
 
 # ---------- Unified TTS Service ----------
@@ -147,6 +168,418 @@ async def synthesize_speech(
     except Exception as e:
         logger.error("Azure TTS fallback failed: %s", e)
         raise HTTPException(status_code=502, detail=f"TTS synthesis failed: {e}") from e
+
+
+def _try_parse_json_obj(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        value = json.loads(text)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _ws_parse_sample_rate(raw_value: Any) -> Optional[int]:
+    if isinstance(raw_value, str) and raw_value.isdigit():
+        raw_value = int(raw_value)
+    if isinstance(raw_value, int) and raw_value in WS_STREAM_SUPPORTED_SR:
+        return raw_value
+    return None
+
+
+def _ws_extract_call_uuid(payload: Dict[str, Any], fallback: Optional[str]) -> Optional[str]:
+    return (
+        payload.get("call_uuid")
+        or payload.get("uuid")
+        or payload.get("callId")
+        or payload.get("callid")
+        or fallback
+    )
+
+
+def _ws_is_flush_command(payload: Dict[str, Any], raw_text: str) -> bool:
+    if payload.get("flush") is True or payload.get("eou") is True:
+        return True
+
+    for key in ("event", "action", "cmd", "type", "signal"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip().lower() in WS_STREAM_FLUSH_EVENTS:
+            return True
+
+    if raw_text.strip().lower() in WS_STREAM_FLUSH_EVENTS:
+        return True
+    return False
+
+
+def _pcm16le_to_wav_bytes(pcm: bytes, sample_rate: int) -> bytes:
+    out = io.BytesIO()
+    with wave.open(out, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)  # 16-bit PCM
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return out.getvalue()
+
+
+def _wav_to_stream_pcm_bytes(wav_bytes: bytes, target_sample_rate: int) -> bytes:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        src_sample_rate = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+
+    # Normalize to 16-bit signed PCM
+    if sample_width != 2:
+        if sample_width == 1:
+            # 8-bit PCM is unsigned, convert to signed then 16-bit
+            frames = audioop.bias(frames, 1, -128)
+        frames = audioop.lin2lin(frames, sample_width, 2)
+        sample_width = 2
+
+    # Downmix to mono if needed
+    if channels > 1:
+        frames = audioop.tomono(frames, sample_width, 0.5, 0.5)
+        channels = 1
+
+    # Resample to stream sample rate
+    if src_sample_rate != target_sample_rate:
+        frames, _ = audioop.ratecv(
+            frames, sample_width, channels, src_sample_rate, target_sample_rate, None
+        )
+    return frames
+
+
+async def _ws_send_json(ws: WebSocket, payload: Dict[str, Any], session: Optional[Dict[str, Any]] = None) -> bool:
+    if session and session.get("closed"):
+        return False
+    try:
+        await ws.send_text(json.dumps(payload, ensure_ascii=False))
+        return True
+    except Exception as exc:
+        if session is not None:
+            session["closed"] = True
+        logger.info("ws send failed: session=%s err=%s", (session or {}).get("session_id"), exc)
+        return False
+
+
+async def _ws_ensure_agent_context(session: Dict[str, Any], incoming_agent_id: Optional[str]) -> None:
+    if not incoming_agent_id or incoming_agent_id == session.get("agent_id"):
+        return
+    try:
+        details = await get_agent_details(incoming_agent_id)
+    except Exception as exc:
+        logger.warning("Failed to load agent %s for ws stream: %s", incoming_agent_id, exc)
+        return
+
+    session["agent_id"] = incoming_agent_id
+    session["instructions"] = details.get("instructions") or "你是一名专业的销售顾问，请主动介绍产品。"
+    metadata = details.get("metadata", {}) or {}
+    ref_audio_b64 = metadata.get("voice_template_b64")
+    session["voice_template"] = base64.b64decode(ref_audio_b64) if ref_audio_b64 else None
+
+    # Reset history when switching agent context
+    system_prompt = session["instructions"] + _WS_PHONE_SYSTEM_PATCH
+    session["history"] = [{"role": "system", "content": system_prompt}]
+
+
+async def _ws_llm_reply(session: Dict[str, Any], user_text: str) -> str:
+    _ensure_model_configured()
+    aoai = get_aoai_client()
+    if not session["history"]:
+        instructions = (session.get("instructions") or "你是一名专业的销售顾问，请主动介绍产品。") + _WS_PHONE_SYSTEM_PATCH
+        session["history"] = [{"role": "system", "content": instructions}]
+
+    session["history"].append({"role": "user", "content": user_text})
+    resp = await run_in_threadpool(
+        lambda: aoai.chat.completions.create(
+            model=MODEL,
+            messages=session["history"],
+            temperature=0.7,
+            max_tokens=220,
+        )
+    )
+    reply = resp.choices[0].message.content or ""
+    session["history"].append({"role": "assistant", "content": reply})
+
+    if len(session["history"]) > WS_STREAM_MAX_HISTORY:
+        session["history"] = [session["history"][0]] + session["history"][-(WS_STREAM_MAX_HISTORY - 1):]
+    return reply
+
+
+def _ws_clean_reply_and_hangup_flag(reply: str) -> tuple[str, bool]:
+    has_hangup = any(sig in reply for sig in _WS_HANGUP_SIGNALS)
+    clean = reply
+    for sig in _WS_HANGUP_SIGNALS:
+        clean = clean.replace(sig, "")
+    return clean.strip(), has_hangup
+
+
+async def _ws_process_audio_buffer(ws: WebSocket, session: Dict[str, Any]) -> None:
+    if session.get("closed") or session["process_lock"].locked():
+        return
+
+    async with session["process_lock"]:
+        async with session["buffer_lock"]:
+            if not session["audio_buffer"]:
+                return
+            pcm_chunk = bytes(session["audio_buffer"])
+            session["audio_buffer"].clear()
+
+        sample_rate = int(session.get("sample_rate") or WS_STREAM_DEFAULT_SR)
+
+        try:
+            wav_bytes = _pcm16le_to_wav_bytes(pcm_chunk, sample_rate)
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                tmp.write(wav_bytes)
+                tmp_path = tmp.name
+            try:
+                transcript = await run_in_threadpool(partial(transcribe_file, tmp_path))
+            finally:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
+            transcript = (transcript or "").strip()
+            if not transcript:
+                return
+
+            reply_text = await _ws_llm_reply(session, transcript)
+            clean_reply, has_hangup = _ws_clean_reply_and_hangup_flag(reply_text)
+            if not clean_reply:
+                return
+
+            reply_wav = await synthesize_speech(
+                text=clean_reply,
+                reference_audio=session.get("voice_template"),
+            )
+            stream_pcm = _wav_to_stream_pcm_bytes(reply_wav, sample_rate)
+            await _ws_send_json(
+                ws,
+                {
+                    "type": "streamAudio",
+                    "data": {
+                        "audioDataType": "raw",
+                        "sampleRate": sample_rate,
+                        "audioData": base64.b64encode(stream_pcm).decode("ascii"),
+                    },
+                },
+                session=session,
+            )
+            await _ws_send_json(
+                ws,
+                {
+                    "event": "agent_reply",
+                    "session_id": session["session_id"],
+                    "call_uuid": session.get("call_uuid"),
+                    "transcript": transcript,
+                    "reply_text": clean_reply,
+                    "hangup": has_hangup,
+                    "ts": int(time.time()),
+                },
+                session=session,
+            )
+        except Exception as exc:
+            logger.warning("ws turn processing failed: session=%s err=%s", session["session_id"], exc)
+            await _ws_send_json(
+                ws,
+                {
+                    "event": "turn_error",
+                    "session_id": session["session_id"],
+                    "call_uuid": session.get("call_uuid"),
+                    "error": str(exc),
+                    "ts": int(time.time()),
+                },
+                session=session,
+            )
+
+
+async def _ws_flush_loop(ws: WebSocket, session: Dict[str, Any]) -> None:
+    flush_interval = 0.2
+    silence_threshold = WS_STREAM_FLUSH_MS / 1000.0
+    try:
+        while not session.get("closed"):
+            await asyncio.sleep(flush_interval)
+            if not session["audio_buffer"]:
+                continue
+            last_audio_at = session.get("last_audio_at", 0.0)
+            if time.time() - last_audio_at >= silence_threshold:
+                await _ws_process_audio_buffer(ws, session)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("ws flush loop ended with error: session=%s err=%s", session["session_id"], exc)
+
+
+@app.websocket("/audio-stream")
+async def ws_audio_stream(websocket: WebSocket):
+    """
+    WebSocket stream endpoint compatible with demo-callcenter.py style:
+    - text message: metadata/commands (JSON preferred)
+    - binary message: L16 PCM audio frames
+    - response: JSON ack + streamAudio(base64 raw PCM)
+    """
+    await websocket.accept()
+    session_id = uuid.uuid4().hex[:16]
+    header_call_uuid = (
+        websocket.headers.get("x-call-id")
+        or websocket.headers.get("x-call-uuid")
+        or websocket.headers.get("x-uuid")
+    )
+    session: Dict[str, Any] = {
+        "session_id": session_id,
+        "connected_at": time.time(),
+        "call_uuid": header_call_uuid,
+        "agent_id": None,
+        "instructions": "你是一名专业的销售顾问，请主动介绍产品。",
+        "voice_template": None,
+        "history": [],
+        "sample_rate": WS_STREAM_DEFAULT_SR,
+        "mix_type": None,
+        "text_count": 0,
+        "audio_frames": 0,
+        "audio_bytes": 0,
+        "dropped_bytes": 0,
+        "last_audio_at": 0.0,
+        "audio_buffer": bytearray(),
+        "buffer_lock": asyncio.Lock(),
+        "process_lock": asyncio.Lock(),
+        "closed": False,
+    }
+    _WS_STREAM_SESSIONS[session_id] = session
+
+    flush_task = asyncio.create_task(_ws_flush_loop(websocket, session))
+    await _ws_send_json(
+        websocket,
+        {
+            "event": "connected",
+            "session_id": session_id,
+            "message": "audio stream server ready",
+            "call_uuid": session.get("call_uuid"),
+            "ts": int(time.time()),
+        },
+        session=session,
+    )
+
+    try:
+        while True:
+            message = await websocket.receive()
+            msg_type = message.get("type")
+            if msg_type == "websocket.disconnect":
+                break
+
+            text = message.get("text")
+            if text is not None:
+                session["text_count"] += 1
+                payload = _try_parse_json_obj(text)
+                if payload:
+                    session["call_uuid"] = _ws_extract_call_uuid(payload, session.get("call_uuid"))
+                    session["mix_type"] = payload.get("mix_type") or session.get("mix_type")
+                    sr = _ws_parse_sample_rate(payload.get("sample_rate"))
+                    if sr:
+                        session["sample_rate"] = sr
+
+                    incoming_agent_id = payload.get("agent_id") or payload.get("memberid") or payload.get("agentId")
+                    await _ws_ensure_agent_context(session, incoming_agent_id)
+
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "event": "server_ack",
+                            "session_id": session_id,
+                            "received": "json_text",
+                            "call_uuid": session.get("call_uuid"),
+                            "sample_rate": session.get("sample_rate"),
+                            "ts": int(time.time()),
+                        },
+                        session=session,
+                    )
+                    if _ws_is_flush_command(payload, text):
+                        await _ws_process_audio_buffer(websocket, session)
+                else:
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "event": "server_ack",
+                            "session_id": session_id,
+                            "received": "plain_text",
+                            "length": len(text),
+                            "ts": int(time.time()),
+                        },
+                        session=session,
+                    )
+                    if _ws_is_flush_command({}, text):
+                        await _ws_process_audio_buffer(websocket, session)
+                continue
+
+            chunk = message.get("bytes")
+            if chunk is not None:
+                session["audio_frames"] += 1
+                session["audio_bytes"] += len(chunk)
+                session["last_audio_at"] = time.time()
+                force_flush = False
+                async with session["buffer_lock"]:
+                    session["audio_buffer"].extend(chunk)
+                    max_bytes = int(session["sample_rate"] * 2 * WS_STREAM_MAX_BUFFER_SEC)
+                    if len(session["audio_buffer"]) > max_bytes:
+                        overflow = len(session["audio_buffer"]) - max_bytes
+                        del session["audio_buffer"][:overflow]
+                        session["dropped_bytes"] += overflow
+                        force_flush = True
+                        logger.warning(
+                            "ws audio buffer trimmed: session=%s dropped=%d total_dropped=%d",
+                            session_id,
+                            overflow,
+                            session["dropped_bytes"],
+                        )
+                if force_flush:
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "event": "buffer_trimmed",
+                            "session_id": session_id,
+                            "dropped_bytes": session["dropped_bytes"],
+                            "ts": int(time.time()),
+                        },
+                        session=session,
+                    )
+                    await _ws_process_audio_buffer(websocket, session)
+
+                if session["audio_frames"] % 100 == 0:
+                    await _ws_send_json(
+                        websocket,
+                        {
+                            "event": "audio_progress",
+                            "session_id": session_id,
+                            "frames": session["audio_frames"],
+                            "bytes": session["audio_bytes"],
+                            "ts": int(time.time()),
+                        },
+                        session=session,
+                    )
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.exception("ws stream error: session=%s err=%s", session_id, exc)
+        try:
+            await _ws_send_json(
+                websocket,
+                {
+                    "event": "server_error",
+                    "session_id": session_id,
+                    "error": str(exc),
+                    "ts": int(time.time()),
+                },
+                session=session,
+            )
+        except Exception:
+            pass
+    finally:
+        session["closed"] = True
+        flush_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await flush_task
+        _WS_STREAM_SESSIONS.pop(session_id, None)
 
 
 @app.post("/api/tts")

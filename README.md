@@ -34,6 +34,7 @@
 - 全自动对话循环：客户录音 → Azure STT → LLM → TTS → 播放
 - 智能挂机：LLM 判断通话结束时自动挂断
 - Webhook 接收呼叫状态、录音片段、通话记录
+- 支持 `demo-callcenter.py` 同款 `mod_audio_stream` WebSocket 双向语音流（`/audio-stream`）
 
 ---
 
@@ -143,6 +144,9 @@ COSYVOICE_ENABLED=true
 AZURE_TTS_VOICE=zh-CN-XiaoxiaoNeural
 ROBOT_CALL_MAX_TURNS=20
 ROBOT_CALL_TURN_TIMEOUT=30
+CALLCENTER_WS_SAMPLE_RATE=8000
+CALLCENTER_WS_FLUSH_MS=900
+CALLCENTER_WS_MAX_BUFFER_SEC=12
 ```
 
 ---
@@ -173,9 +177,27 @@ curl -X POST http://your-server:8000/api/robot_call/start \
 
 详细架构和 Webhook 说明见 [docs/robot_call_architecture.md](docs/robot_call_architecture.md)。
 
+### WebSocket 音频流（demo-callcenter.py 模式）
+
+- WebSocket 地址：`ws://your-server:8000/audio-stream`
+- 上行：
+  - 文本帧（metadata JSON）：`uuid`/`call_uuid`、`memberid`（可选，映射 Agent）、`sample_rate`（8000/16000）
+  - 二进制帧：L16 PCM（16-bit little-endian, mono）
+- 下行：
+  - 普通 JSON 事件（`connected`、`server_ack`、`audio_progress`、`turn_error`）
+  - 播放帧：`{"type":"streamAudio","data":{"audioDataType":"raw","sampleRate":8000,"audioData":"<base64 pcm>"}}`
+
+本地冒烟：
+
+```bash
+python3 backend/scripts/ws_audio_stream_smoke.py --url ws://127.0.0.1:8000/audio-stream
+```
+
 ---
 
 ## 呼叫中心配置
+
+### 模式 A：Webhook 录音回传（原有模式）
 
 在云虎呼叫中心管理后台配置以下回调地址：
 
@@ -184,6 +206,12 @@ curl -X POST http://your-server:8000/api/robot_call/start \
 | 坐席状态回调 | `http://your-server:8000/api/webhook/callcenter/status` |
 | 实时录音片段 | `http://your-server:8000/api/webhook/callcenter/audio` |
 | 通话记录回调 | `http://your-server:8000/api/webhook/callcenter/record` |
+
+### 模式 B：mod_audio_stream WebSocket（demo-callcenter.py 模式）
+
+- 云虎/交换机侧把音频流推到：`ws://your-server:8000/audio-stream`
+- 该模式下对话主链路走 WebSocket，不依赖 `status/audio/record` 三个回调来驱动 STT→LLM→TTS
+- 若仍需运营统计或录音归档，可保留 `record` 回调
 
 ---
 
@@ -197,9 +225,11 @@ curl -X POST http://your-server:8000/api/robot_call/start \
 - [ ] 将 `CORS_ORIGINS` 改为实际前端域名/IP
 
 ### 外呼功能（使用前必须）
+- [ ] 先确定对接模式：`Webhook 录音回传` 或 `mod_audio_stream WebSocket`
 - [ ] `backend/.env` 填入 `CALLCENTER_APP_ID` 和 `CALLCENTER_ACC_KEY`
 - [ ] `backend/.env` 填入 `ROBOT_CALL_AUDIO_BASE_URL`（服务器公网地址）
-- [ ] 在云虎呼叫中心后台配置以下 3 个 Webhook 回调地址（将 `your-server` 替换为服务器 IP 或域名）：
+- [ ] 若使用 WebSocket 模式：云虎/交换机语音通道目标配置为 `ws://your-server:8000/audio-stream`
+- [ ] 若使用 Webhook 模式：在云虎呼叫中心后台配置以下 3 个 Webhook 回调地址（将 `your-server` 替换为服务器 IP 或域名）：
   - **坐席状态回调**：`http://your-server:8000/api/webhook/callcenter/status`
     （接收 ring/answer/hangup 事件，接通时触发机器人开场白）
   - **实时录音片段回调**：`http://your-server:8000/api/webhook/callcenter/audio`
@@ -233,6 +263,7 @@ curl -X POST http://your-server:8000/api/robot_call/start \
 | `GET /api/agents` | Agent 列表 |
 | `POST /api/agents/{id}/chat/stream` | 流式聊天 |
 | `POST /api/robot_call/start` | 触发机器人外呼 |
+| `WS /audio-stream` | mod_audio_stream 双向语音流 |
 | `POST /api/tts` | TTS 合成 |
 | `GET /health` | 服务健康检查 |
 

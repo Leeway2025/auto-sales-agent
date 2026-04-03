@@ -97,6 +97,53 @@ POST /api/robot_call/start
 | `POST /api/webhook/callcenter/audio` | 每轮客户说话录音片段就绪 |
 | `POST /api/webhook/callcenter/record` | 通话结束后推送完整记录 |
 
+### WebSocket 流式语音通道（demo-callcenter.py 模式）
+
+当使用 `mod_audio_stream` 风格的双向语音流时，可直接连接：
+
+```text
+ws://<your-server>:8000/audio-stream
+```
+
+协议约定：
+
+1. 文本帧（JSON metadata，示例）
+
+```json
+{
+  "uuid": "call-uuid-xxx",
+  "memberid": "asst_xxx",
+  "sample_rate": 8000,
+  "mix_type": "mono"
+}
+```
+
+2. 二进制帧（L16 PCM）
+
+- 单声道 `16-bit little-endian` PCM
+- 采样率建议 `8000` 或 `16000`
+- 服务端会按静音间隔自动切分轮次，驱动 STT → LLM → TTS
+
+3. 服务端回包
+
+- ACK / 进度事件（JSON 文本帧）
+- 播放音频（`streamAudio` JSON 文本帧，`audioData` 为 base64 raw PCM）
+
+```json
+{
+  "type": "streamAudio",
+  "data": {
+    "audioDataType": "raw",
+    "sampleRate": 8000,
+    "audioData": "<base64 pcm>"
+  }
+}
+```
+
+说明：
+- 该模式与 HTTP Webhook 模式可并行保留，便于平滑迁移。
+- 若 metadata 中包含 `memberid`，服务端会按该 Agent 加载话术与声音模板。
+
 ---
 
 ## 环境变量
@@ -113,6 +160,11 @@ ROBOT_CALL_AUDIO_BASE_URL=https://your-server.com
 # 行为参数
 ROBOT_CALL_MAX_TURNS=20    # 最大对话轮次
 ROBOT_CALL_TURN_TIMEOUT=30 # 等待客户超时（秒）
+
+# WebSocket 流式语音（demo-callcenter.py 模式）
+CALLCENTER_WS_SAMPLE_RATE=8000     # 默认采样率（metadata 未指定时）
+CALLCENTER_WS_FLUSH_MS=900         # 静音切分阈值（毫秒）
+CALLCENTER_WS_MAX_BUFFER_SEC=12    # 单路最大缓存音频秒数
 ```
 
 ---
@@ -128,6 +180,8 @@ ROBOT_CALL_TURN_TIMEOUT=30 # 等待客户超时（秒）
 | 通话记录回调 | `https://your-server.com/api/webhook/callcenter/record` |
 
 > 回调地址必须为 **HTTPS 公网可访问地址**。本地开发可用 `ngrok` 临时暴露。
+
+若使用 `mod_audio_stream` WebSocket 模式，则对话主链路走 `ws://<your-server>:8000/audio-stream`，无需用这 3 个回调来驱动 STT→LLM→TTS。
 
 ---
 
